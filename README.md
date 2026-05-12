@@ -2,7 +2,7 @@
 
 Pipeline em Airflow para automação de ingestão de dados do MCID (Ministério das Cidades).
 Baixa arquivos CSV de um servidor SFTP, carrega em um banco PostgreSQL em duas camadas
-(`__dados_brutos` e `__dados_processados`) e move os arquivos processados para uma pasta
+(`tabela1` e `tabela2`) e move os arquivos processados para uma pasta
 histórica no SFTP.
 
 ## Arquitetura
@@ -10,8 +10,8 @@ histórica no SFTP.
 ```mermaid
 graph LR
     A[SFTP /home/fabrica/GEFUS] -->|baixa CSV| B[task_email.py]
-    B -->|TRUNCATE + INSERT| C[(PostgreSQL __dados_brutos)]
-    B -->|TRUNCATE + INSERT| D[(PostgreSQL __dados_processados)]
+    B -->|TRUNCATE + INSERT| C[(PostgreSQL tabela1)]
+    B -->|TRUNCATE + INSERT| D[(PostgreSQL tabela2)]
     B -->|move arquivo| E[SFTP /ANTERIORES]
 ```
 
@@ -35,22 +35,22 @@ automacoes-MCID-airflow/
 ## task_email.py
 
 Responsável por ingerir o arquivo mais recente do padrão
-`Dados_Prioritarios_Contratacoes_MCMV_FAR_FDS_RURAL_Semanal_YYYYMMDD.csv`. Fluxo:
+`Arquivo_exemplo.csv`. Fluxo:
 
 1. Conecta no SFTP via `paramiko` e lista os CSVs que casam com `file_prefix`.
 2. Escolhe o arquivo mais recente (`max(available_files)` — o sufixo `YYYYMMDD` garante
    que a ordem alfabética é a ordem cronológica).
-3. Compara com `SELECT DISTINCT _source_file FROM __dados_processados.<tabela>`. Se a
+3. Compara com `SELECT DISTINCT _source_file FROM tabela2.<tabela>`. Se a
    tabela já contém exatamente esse arquivo, encerra.
 4. Baixa o CSV para um `BytesIO` e lê com `pandas.read_csv` (separador `;`, encoding
    `utf-8`).
 5. Normaliza nomes de colunas (remove acentos, lowercase, troca espaços por `_`).
 6. Em uma transação (`engine.begin()`):
-   - `TRUNCATE __dados_brutos.<tabela>`
-   - `TRUNCATE __dados_processados.<tabela>`
+   - `TRUNCATE tabela1.<tabela>`
+   - `TRUNCATE tabela2.<tabela>`
 7. Insere o DataFrame nas duas schemas:
-   - `__dados_brutos`: todas as colunas como `VARCHAR(255)`.
-   - `__dados_processados`: tipagem semântica (`Date`, `Float`, `Integer`, `VARCHAR`)
+   - `tabela1`: todas as colunas como `VARCHAR(255)`.
+   - `tabela2`: tipagem semântica (`Date`, `Float`, `Integer`, `VARCHAR`)
      para colunas conhecidas (`data_de_movimento`, `data_de_contratacao`,
      `valor_contratado`, `uh_contratadas`, etc.).
 8. Move o arquivo no SFTP para `SFTP_DIR_ANTERIORES`. Se a movimentação falhar (por
@@ -67,8 +67,8 @@ Responsável por ingerir o arquivo mais recente do padrão
 | `file_prefix` | Prefixo do nome do arquivo a ser ingerido |
 | `local_dir` | Diretório local de download |
 | `TABLE_NAME` | Nome da tabela de destino (mesmo nome nas duas schemas) |
-| `BANCO_BRUTOS` | Schema dos dados crus (ex.: `__dados_brutos`) |
-| `BANCO_PROCESSADOS` | Schema dos dados tipados (ex.: `__dados_processados`) |
+| `BANCO_BRUTOS` | Schema dos dados crus (ex.: `tabela1`) |
+| `BANCO_PROCESSADOS` | Schema dos dados tipados (ex.: `tabela2`) |
 
 ## Setup
 
