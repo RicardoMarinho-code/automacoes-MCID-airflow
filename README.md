@@ -1,267 +1,107 @@
-﻿
+# automacoes-MCID-airflow
 
-# code-challenge
-*Written by Aluizio Cidral Júnior*
+Pipeline em Airflow para automação de ingestão de dados do MCID (Ministério das Cidades).
+Baixa arquivos CSV de um servidor SFTP, carrega em um banco PostgreSQL em duas camadas
+(`__dados_brutos` e `__dados_processados`) e move os arquivos processados para uma pasta
+histórica no SFTP.
 
-Resolution of Indicium Code challenge for Software Developer 
-
-## The Challenge Synopsis
-
-Build a pipeline that extracts the data everyday from two sources and write the data first to local disk, and second to a database. 
+## Arquitetura
 
 ```mermaid
-
-graph LR;
-    A[Postgres]-->B[Local FileSystem];
-    C[CSV File]-->B;
-    B--> D[My Database]
-```
-More info about the challenge can be found at: https://github.com/techindicium/code-challenge
-
-## Solution
-
-To achieve the challenge goal I decided to work with [Airflow](airflow.apache.org/), which is a tool to describing, executing and monitoring workflows. 
-
-Airflow works with DAG (Directed Acyclic Graph) to group  and organize tasks.
-
-### Tasks
-For this pipeline there are three main tasks:
-1. Extract data from Postgres database and write to local disk
-2. Extract data from CSV file and write to local disk
-3. Extract data from local filesystem, transform and load to final database
-
-Every task was write as a Python script:
-
-**Task1:** Connects to Postgress Database, gets the names of all tables and write the data in the local file with path for each source, table and execution day. 
-```python
-import  psycopg2
-import  pandas  as  pd
-import  os
-import  sys
-
-date = sys.argv[1][:10]
-
-#PostgreSQL Connection
-host = "postgres-container-indicium"
-database = "northwind"
-user = "northwind_user"
-password = "thewindisblowing"
-  
-db_conn = psycopg2.connect(host=host,database = database, user = user, password = password)
-db_cursor = db_conn.cursor()
-
-def  get_table_names(db_cursor):
-	table_names = []
-	db_cursor.execute("""SELECT table_name FROM information_schema.tables
-	WHERE table_schema = 'public'""")
-	for  name  in  db_cursor.fetchall():
-		table_names.append(name[0])
-	return  table_names
- 
-def  csv_export(db_cursor,table_name,date):
-	select = """SELECT * FROM {0}""".format(table_name)
-	SQL_for_file_output = "COPY ({0}) TO STDOUT WITH CSV HEADER".format(select)
-	path_file = "/data/postgres/{0}/{1}/data.csv".format(table_name,date)
-	os.makedirs(os.path.dirname(path_file), exist_ok = True)
-	with  open(path_file, 'w') as  f_output:
-		db_cursor.copy_expert(SQL_for_file_output, f_output)
-
-for  table_name  in  get_table_names(db_cursor):
-	csv_export(db_cursor,table_name,date)
-``` 
-**Task 2:** Copies the csv file and write in the local file with path for each source, table and execution day. 
-```python
-import  shutil
-import  os
-import  sys
-
-date = sys.argv[1][:10]
-
-input_file = "/data/order_details.csv"
-output = "/data/csv/{0}/data.csv".format(date)
-os.makedirs(os.path.dirname(output), exist_ok = True)
-shutil.copy(input_file,output)
-```
-**Task 3:** Extracts local data, joins tables and saves as json in Mongo database. I choose the json format because it's possible to list products of same order in the same json. Make things easy for a Front End Developer if hes wants to show the order details with the list of products inside.
-```python
-import  collections
-from  numpy  import  product
-import  pandas  as  pd
-from  pymongo  import  MongoClient
-import  sys
-
-date = sys.argv[1][:10]
-
-#Extract local data
-orders = pd.read_csv("/data/postgres/orders/{0}/data.csv".format(date))
-products = pd.read_csv("/data/postgres/products/{0}/data.csv".format(date))
-customers = pd.read_csv("/data/postgres/customers/{0}/data.csv".format(date))
-order_details = pd.read_csv("/data/csv/{0}/data.csv".format(date))
-
-#Transform
-orders = orders[['order_id','order_date','customer_id']].set_index('order_id')
-products = products[['product_id','product_name']].set_index('product_id')
-customers = customers[['customer_id','company_name']].set_index('customer_id')
-orders = orders.join(customers, on = 'customer_id')
-order_details = order_details.join(products, on = 'product_id')
-
-data = []
-for  order_id  in  order_details.order_id.unique():
-	json = order_details[order_details.order_id == order_id].drop("order_id", axis = 1).to_dict("records")
-	order = {
-		"order_id": order_id,
-		"order_date": orders.loc[order_id]['order_date'],
-		"company_name": orders.loc[order_id]['company_name'],
-		"products": json_order,
-		"db_execution_date": date
-		}
-	data.append(order)
-
-details = pd.DataFrame(data).to_dict("records")
-
-# Load to Database
-client = MongoClient('mongo-container', 27017, username='dharma', password = '4815162342')
-db = client['orders']
-collection = db['details']
-collection.insert_many(details)
-```
-Output sample in Mongo database:
-
-```json
-{
-	"_id" : ObjectId("601b4a5a5d3951efca454d16"),
-	"order_id" : 10267,
-	"order_date" : "1996-07-29",
-	"company_name" : "Frankenversand",
-	"products" : [
-		{
-			"product_id" : 40,
-			"unit_price" : 14.7,
-			"quantity" : 50,
-			"discount" : 0,
-			"product_name" : "Boston Crab Meat"
-		},
-		{
-			"product_id" : 59,
-			"unit_price" : 44,
-			"quantity" : 70,
-			"discount" : 0.15,
-			"product_name" : "Raclette Courdavault"
-		},
-		{
-			"product_id" : 76,
-			"unit_price" : 14.4,
-			"quantity" : 15,
-			"discount" : 0.15,
-			"product_name" : "Lakkalikööri"
-		}
-	],
-	"db_execution_date" : "2015-01-01"
-}
+graph LR
+    A[SFTP /home/fabrica/GEFUS] -->|baixa CSV| B[task_email.py]
+    B -->|TRUNCATE + INSERT| C[(PostgreSQL __dados_brutos)]
+    B -->|TRUNCATE + INSERT| D[(PostgreSQL __dados_processados)]
+    B -->|move arquivo| E[SFTP /ANTERIORES]
 ```
 
+A DAG `DAG-indicium` em [dags/dag.py](dags/dag.py) executa quatro tasks em sequência
+(`task1`, `task2` e `task3` em paralelo no início, e `task_email` no fim) e está agendada
+para rodar a cada 2 horas (`0 */2 * * *`).
 
-### DAG
-One of requirements is that Task 3 depends on Task 1 and Task 2, so tasks 1 and 2 has to run successfully before task 3 can run. To deal with these dependencies Airflow needs a DAG file. The last line in the next code imposes these dependencies. 
-This DAG is schedule to run at intervals of one day.
-
-DAG File
-
-```python
-from  airflow  import  DAG
-from  datetime  import  datetime, timedelta
-from  airflow.operators.bash_operator  import  BashOperator
-from  airflow.utils.dates  import  days_ago
-
-default_args = {
-'owner': 'Aluizio Cidral Júnior',
-'depends_on_past': False,
-'start_date': days_ago(2),
-'retries': 1,
-}
-
-with  DAG(
-'DAG',
-schedule_interval=timedelta(days=1),
-default_args=default_args
-) as  dag:
-
-	t1 = BashOperator(
-	task_id='task1',
-	bash_command="""
-	cd $AIRFLOW_HOME/dags/tasks/
-	python3 task1.py {{ execution_date }}
-	""")
-	t2 = BashOperator(
-	task_id='task2',
-	bash_command="""
-	cd $AIRFLOW_HOME/dags/tasks/
-	python3 task2.py {{ execution_date }}
-	""")
-
-	t3 = BashOperator(
-	task_id='task3',
-	bash_command="""
-	cd $AIRFLOW_HOME/dags/tasks/
-	python3 task3.py {{ execution_date }}
-	""")
-
-[t1,t2] >> t3
-```
-## Setup of the Solution
-
-I used Docker to containerize  my solution. The source code can be set up using docker compose. You can install following the instructions at [https://docs.docker.com/compose/install/](https://docs.docker.com/compose/install/)
-With docker compose installed simply run:
+## Estrutura do projeto
 
 ```
+automacoes-MCID-airflow/
+├── dags/
+│   ├── dag.py                  # Definição da DAG e dependências entre tasks
+│   └── tasks/
+│       └── task_email.py       # Ingestão do CSV semanal MCMV via SFTP
+├── requirements.txt
+├── docker-compose.yml
+└── .env                        # Credenciais e configuração (não versionado)
+```
+
+## task_email.py
+
+Responsável por ingerir o arquivo mais recente do padrão
+`Dados_Prioritarios_Contratacoes_MCMV_FAR_FDS_RURAL_Semanal_YYYYMMDD.csv`. Fluxo:
+
+1. Conecta no SFTP via `paramiko` e lista os CSVs que casam com `file_prefix`.
+2. Escolhe o arquivo mais recente (`max(available_files)` — o sufixo `YYYYMMDD` garante
+   que a ordem alfabética é a ordem cronológica).
+3. Compara com `SELECT DISTINCT _source_file FROM __dados_processados.<tabela>`. Se a
+   tabela já contém exatamente esse arquivo, encerra.
+4. Baixa o CSV para um `BytesIO` e lê com `pandas.read_csv` (separador `;`, encoding
+   `utf-8`).
+5. Normaliza nomes de colunas (remove acentos, lowercase, troca espaços por `_`).
+6. Em uma transação (`engine.begin()`):
+   - `TRUNCATE __dados_brutos.<tabela>`
+   - `TRUNCATE __dados_processados.<tabela>`
+7. Insere o DataFrame nas duas schemas:
+   - `__dados_brutos`: todas as colunas como `VARCHAR(255)`.
+   - `__dados_processados`: tipagem semântica (`Date`, `Float`, `Integer`, `VARCHAR`)
+     para colunas conhecidas (`data_de_movimento`, `data_de_contratacao`,
+     `valor_contratado`, `uh_contratadas`, etc.).
+8. Move o arquivo no SFTP para `SFTP_DIR_ANTERIORES`. Se a movimentação falhar (por
+   exemplo, arquivo já existe no destino), apenas loga um `[WARN]` e segue.
+
+## Variáveis de ambiente (`.env`)
+
+| Variável | Descrição |
+|---|---|
+| `host`, `port`, `database`, `user`, `password` | Conexão PostgreSQL |
+| `SFTP_HOST`, `SFTP_PORT`, `SFTP_USER`, `SFTP_PASSWORD` | Conexão SFTP |
+| `SFTP_DIR` | Diretório remoto onde os CSVs novos chegam |
+| `SFTP_DIR_ANTERIORES` | Diretório remoto para onde os arquivos processados são movidos |
+| `file_prefix` | Prefixo do nome do arquivo a ser ingerido |
+| `local_dir` | Diretório local de download |
+| `TABLE_NAME` | Nome da tabela de destino (mesmo nome nas duas schemas) |
+| `BANCO_BRUTOS` | Schema dos dados crus (ex.: `__dados_brutos`) |
+| `BANCO_PROCESSADOS` | Schema dos dados tipados (ex.: `__dados_processados`) |
+
+## Setup
+
+Requisitos: Python 3.10+ e acesso ao SFTP e ao PostgreSQL.
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env   # crie e preencha o .env
+```
+
+Para subir via Docker Compose:
+
+```bash
 docker-compose up -d
 ```
-## Testing the Pipeline
 
-After you set up my code, it is possible to test each task or the whole pipeline in the past.
-Access the Airflow container:
-```
-docker exec -it airflow-container bash
-```
-To test some task:
+## Execução manual
 
-```
-airflow test DAG-indicium task1 2020-01-01
-```
-Tasks available in DAG-indicium: task1, task2, task3. 
+A task `task_email` pode ser executada fora do Airflow para teste, passando uma data:
 
-To run the pipeline in past days:
-```
-airflow backfill DAG-indicium -s 2020-01-01 -e 2020-01-04
-```
-The output files will be load at `/data` folder.
-
-## Access Mongo Database
-
-To access the Mongo Database (and see the outputs of task3), in a new terminal:
-```
-mongo -u dharma -p 4815162342 --authenticationDatabase "admin"
-```
-On mongo terminal:
-```
-> use orders
-> db.details.find().pretty()
+```bash
+python dags/tasks/task_email.py 2026-05-08
 ```
 
+Se o argumento for omitido, usa a data/hora local atual.
 
-## Monitor and Troubleshoot 
+## Observações
 
-Airflow provides a web service to monitor and troubleshoot in pipelines. To start the web server:
-```
-airflow webserver -p 8080
-```
-And Access by address [localhost:8080](https://localhost:8080). 
-It is possible to verify if the pipeline failed there.
-
-Thanks for reading! 
-
-Aluizio Cidral Júnior
-[https://www.linkedin.com/in/cidraljunior/](https://www.linkedin.com/in/cidraljunior/)
-[https://github.com/cidraljunior/](https://github.com/cidraljunior/)
-
-> Written with [StackEdit](https://stackedit.io/).
+- O script usa `engine.begin()` ao truncar para garantir commit explícito (necessário a
+  partir do SQLAlchemy 2.0 — `engine.connect()` sozinho faz rollback ao sair do
+  contexto).
+- A lógica de deduplicação compara `_source_file` no banco com o último arquivo do
+  SFTP: como o `TRUNCATE` zera as tabelas a cada carga, a coluna `_source_file` sempre
+  refletirá apenas o último arquivo carregado.
+- A task `task_email` é idempotente: se rodar duas vezes com o mesmo arquivo no SFTP,
+  a segunda execução detecta que o banco já está carregado e encerra sem trabalho.
