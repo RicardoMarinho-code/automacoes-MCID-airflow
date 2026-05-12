@@ -1,0 +1,4 @@
+pymongo==3.11.2
+SQLAlchemy==1.4.46
+python-dotenv==1.0.0
+paramiko==3.4.0
